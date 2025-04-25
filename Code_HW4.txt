@@ -2,6 +2,7 @@
 
 from pyspark.sql import SparkSession
 from pyspark.sql import Row
+from collections import OrderedDict
 
 spark = SparkSession.builder.appName("SearchLog").getOrCreate()
 
@@ -33,7 +34,7 @@ df.write.mode("overwrite").json("processed_data")
 
 # Code for querying records
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 import os
 import json
 from collections import defaultdict
@@ -41,7 +42,7 @@ from collections import defaultdict
 app = Flask(__name__)
 
 def domain_priority(domain):
-    if domain('.org'):
+    if domain.endswith('.org'):
         return 1
     elif domain.endswith('.edu'):
         return 2
@@ -59,8 +60,9 @@ def get_results():
     for filename in os.listdir('processed_data'):
         if filename.endswith('.json'):
             with open(os.path.join('processed_data', filename), 'r') as file:
-                record = json.load(file)
-                records.append(record)
+                for line in file:
+                    record = json.loads(file)
+                    records.append(record)
 
     filtered_records = [r for r in records if r["term"] == search_term]
 
@@ -72,8 +74,12 @@ def get_results():
         url_clicks.items(),
         key=lambda x: (-x[1], domain_priority(x[0]), x[0]))
 
-    result = {url: clicks for url, clicks in sorted_urls}
-    return jsonify({"results": result})
+    ordered_result = OrderedDict((url, clicks) for url, clicks in sorted_urls)
+
+    return Response(
+        json.dumps({"results": ordered_result}),
+        mimetype='application/json'
+    )
 
 @app.route('/trends', methods=['POST'])
 def get_trends():
