@@ -1,0 +1,136 @@
+# Code for preprocessing records
+
+from pyspark.sql import SparkSession
+from pyspark.sql import Row
+
+spark = SparkSession.builder.appName("SearchLog").getOrCreate()
+
+searchLog = spark.sparkContext.textFile("./searchLog.csv")
+
+def parse_line(line):
+    try:
+        search_term_column, urls_column = line.split(",", 1)
+        search_term = search_term_column.split(":")[1].replace("`", "").strip()
+        urls_with_clicks = urls_column.strip().split("~")
+        
+        results = []
+        for url_with_click in urls_with_clicks:
+            if  ":" in url_with_click:
+                url, clicks = url_with_click.split(":")
+                results.append((search_term, url.strip(), int(clicks.strip())))
+        
+        return results
+    except Exception as e:
+        return []
+    
+searchLog_list = searchLog.flatMap(parse_line)
+
+df = searchLog_list.map(lambda x: Row(term=x[0], url=x[1], clicks=x[2])).toDF()
+
+df = df.repartition(df.count())
+
+df.write.mode("overwrite").json("processed_data")
+
+# Code for querying records
+
+from flask import Flask, request, jsonify
+import os
+import json
+from collections import defaultdict
+
+app = Flask(__name__)
+
+def domain_priority(domain):
+    if domain('.org'):
+        return 1
+    elif domain.endswith('.edu'):
+        return 2
+    elif domain.endswith('.com'):
+        return 3
+    else:
+        return 4
+
+@app.route('/results', methods=['POST'])
+def get_results():
+    data = request.get_json()
+    search_term = data["term"].strip()
+
+    records = []
+    for filename in os.listdir('processed_data'):
+        if filename.endswith('.json'):
+            with open(os.path.join('processed_data', filename), 'r') as file:
+                record = json.load(file)
+                records.append(record)
+
+    filtered_records = [r for r in records if r["term"] == search_term]
+
+    url_clicks = defaultdict(int)
+    for record in filtered_records:
+        url_clicks[record["url"]] += record["clicks"]
+
+    sorted_urls = sorted(
+        url_clicks.items(),
+        key=lambda x: (-x[1], domain_priority(x[0]), x[0]))
+
+    result = {url: clicks for url, clicks in sorted_urls}
+    return jsonify({"results": result})
+
+@app.route('/trends', methods=['POST'])
+def get_trends():
+    data = request.get_json()
+    search_term = data["term"].strip()
+
+    total_clicks = 0
+    for filename in os.listdir('processed_data'):
+        if filename.endswith('.json'):
+            with open(os.path.join('processed_data', filename), 'r') as file:
+                for line in file:
+                    record = json.loads(line)
+                    if record["term"] == search_term:
+                        total_clicks += record["clicks"]
+
+    return jsonify({"clicks": total_clicks})
+
+@app.route('/popularity', methods=['POST'])
+def get_popularity():
+    data = request.get_json()
+    url = data["url"].strip()
+
+    total_clicks = 0
+    for filename in os.listdir('processed_data'):
+        if filename.endswith('.json'):
+            with open(os.path.join('processed_data', filename), 'r') as file:
+                for line in file:
+                    record = json.loads(line)
+                    if record["url"] == url:
+                        total_clicks += record["clicks"]
+
+    return jsonify({"clicks": total_clicks})
+
+
+@app.route('/getBestTerms', methods=['POST'])
+def get_best_terms():
+    data = request.get_json()
+    website = data["website"].strip()
+
+    term_clicks = defaultdict(int)
+    total_clicks = 0
+
+    for filename in os.listdir('processed_data'):
+        if filename.endswith('.json'):
+            with open(os.path.join('processed_data', filename), 'r') as file:
+                for line in file:
+                    record = json.loads(line)
+                    if record["url"] == website:
+                        term_clicks[record["term"]] += record["clicks"]
+                        total_clicks += record["clicks"]
+
+    best_terms = [
+        term for term, clicks in term_clicks.items()
+        if clicks / total_clicks > 0.05
+    ] if total_clicks > 0 else []
+
+    return jsonify({"best_terms": best_terms})
+
+if __name__ == '__main__':
+    app.run(debug=True, host='0.0.0.0', port=4040)
